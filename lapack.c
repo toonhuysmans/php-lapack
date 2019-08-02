@@ -22,6 +22,8 @@
 #include "Zend/zend_exceptions.h"
 #include "ext/standard/info.h"
 
+#include "cblas.h"
+
 static zend_class_entry *php_lapack_sc_entry;
 static zend_class_entry *php_lapack_exception_sc_entry;
 static zend_object_handlers lapack_object_handlers;
@@ -533,6 +535,146 @@ PHP_METHOD(Lapack, singularValues)
 }
 /* }}} */
 
+/* {{{ array Lapack::shapeRegressionModel(array M, array P, array W);
+Calculate a regression model between the measurements M and the 3D shapes
+represented by the Principal Components (PCs) in P and the PC weights in W.
+Returns an array representing the regression equations/model in matrix form. 
+Expects arrays of arrays, with M number of subjects by number of measures, 
+P 3 times number of vertices by number of PCs, W number of subjects by number 
+of PCs, and will return an array of arrays in the dimension three times number 
+of vertices by number of measures plus 1. Uses SVD of M internally. 
+*/
+PHP_METHOD(Lapack, shapeRegressionModel)
+{
+	zval *M, *P, *W;
+	double *Ml, *Pl, *Wl, *Fl, *S, *U, *VT, *superb, *Sinv, *T1, *T2, *T3, *R;
+	int i, j, k;
+
+	// ns = number of subjects, nf = number of features/measurements, 
+	// np = number of principal components, nc = number of coordinate values
+	lapack_int info,n,m,ns,nf,np,nc,ldM,ldP,ldW,ldF,ldU,ldVT;
+
+	/* Negative rcond means using default (machine precision) value */
+	double rcond = -1.0;
+
+	// parse paremeters
+	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "aaa", &M, &P, &W) == FAILURE) {
+		return;
+	}
+	
+	Ml = php_lapack_linearize_array(M, &ns, &nf);
+	if (Ml == NULL) {
+		LAPACK_THROW("Invalid input matrix - argument 1 (M)", 102);
+	}
+	
+	Pl = php_lapack_linearize_array(P, &nc, &np);
+	if (Pl == NULL) {
+		efree(Ml);
+		LAPACK_THROW("Invalid input matrix - argument 2 (P)", 102);
+	}
+	
+	Wl = php_lapack_linearize_array(W, &m, &n);
+	if (Wl == NULL) {
+		efree(Ml);
+		efree(Pl);
+		LAPACK_THROW("Invalid input matrix - argument 3 (W)", 102);
+	}
+	if( m != ns )
+	{
+		LAPACK_THROW("Invalid input matrix - argument 3 (W), wrong number of rows", 102);	
+	}
+	if( n != np )
+	{
+		LAPACK_THROW("Invalid input matrix - argument 3 (W), wrong number of columns", 102);	
+	}
+
+	// create matrix F which is M transposed with additional row of ones.
+	Fl = safe_emalloc((nf + 1) * ns, sizeof(double), 0);
+
+	for ( i = 0; i < nf+1; i++ ) 
+	{
+		for ( j = 0; j < ns; j++ ) 
+		{
+			k = (j * (nf+1)) + i;
+			Fl[k] = (i < nf) ? Ml[(i * ns) + j] : 1.0;
+		}
+	}
+
+	// do svd of F
+	ldF = nf+1;
+	
+	S = safe_emalloc(nf+1, sizeof(double), 0);
+
+	ldU = nf+1;
+	U = safe_emalloc((nf + 1) * (nf + 1), sizeof(double), 0);
+
+	ldVT = nf + 1;
+	VT = safe_emalloc((nf + 1) * ns , sizeof(double), 0);
+
+	superb = safe_emalloc(nf , sizeof(double), 0);
+
+	info = LAPACKE_dgesvd ( LAPACK_COL_MAJOR, 'S', 'S', nf + 1, ns, Fl, ldF, S, U, ldU,
+              				VT, ldVT, superb );
+	if ( info == LAPACK_WORK_MEMORY_ERROR || info == LAPACK_TRANSPOSE_MEMORY_ERROR ) 
+	{
+		LAPACK_THROW("Not enough memory to calculate result", 101);
+	} 
+	else if (info > 0) 
+	{
+		LAPACK_THROW("SVD failed", 101);
+	}
+
+	// Step by step mulitiplication of R = P . W^T . V . S^-1 . U^T
+
+	// T1 = S^-1 . U^T
+	T1 = safe_emalloc( (nf+1) * (nf+1), sizeof(double), 0);
+
+	Sinv = safe_emalloc( (nf+1) * (nf+1), sizeof(double), 0);
+	for ( i = 0; i < nf+1; i++ ) 
+	{
+		Sinv[ i * (nf + 1) + i ] = 1.0 / S[i];
+	}
+
+    cblas_dgemm( CblasColMajor,  CblasNoTrans, CblasTrans, (nf + 1), (nf + 1), (nf + 1),
+                   1.0, Sinv, (nf + 1), U, (nf + 1), 0.0, T1, (nf + 1) );
+
+	// T2 = V . T1 = VT^T . T1
+    T2 = safe_emalloc( ns * (nf+1), sizeof(double), 0);
+
+    cblas_dgemm( CblasColMajor,  CblasTrans, CblasNoTrans, ns, (nf + 1), (nf + 1),
+                   1.0, VT, (nf + 1), T1, (nf + 1), 0.0, T2, ns );
+
+	// T3 = W^T . T2
+    T3 = safe_emalloc( np * (nf+1), sizeof(double), 0);
+
+    cblas_dgemm( CblasColMajor,  CblasTrans, CblasNoTrans, np, (nf + 1), ns,
+                   1.0, Wl, ns, T2, ns, 0.0, T3, np );
+
+	// R = P . T3
+ 	R = safe_emalloc( nc * (nf+1), sizeof(double), 0);
+
+    cblas_dgemm( CblasColMajor,  CblasNoTrans, CblasNoTrans, nc, (nf + 1), np,
+                   1.0, Pl, nc, T3, np, 0.0, R, nc );
+
+	// assemble matrices for output
+	php_lapack_reassemble_array(return_value, R, nc, nf+1, nc);
+	
+	efree(Ml);
+	efree(Pl);
+	efree(Wl);
+	efree(S);
+	efree(U);
+	efree(VT);
+	efree(superb);
+	efree(Sinv);
+	efree(T1);
+	efree(T2);
+	efree(T3);
+	efree(R);
+
+	return;
+}
+/* }}} */
 
 /* --- ARGUMENTS AND INIT --- */
 
@@ -554,6 +696,11 @@ ZEND_BEGIN_ARG_INFO_EX(lapack_eigen_args, 0, 0, 1)
 	ZEND_ARG_INFO(0, right)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(lapack_srm_args, 0, 0, 3)
+	ZEND_ARG_INFO(0, M)
+	ZEND_ARG_INFO(0, P)
+	ZEND_ARG_INFO(0, W)
+ZEND_END_ARG_INFO()
 
 static zend_function_entry php_lapack_class_methods[] =
 {
@@ -564,6 +711,7 @@ static zend_function_entry php_lapack_class_methods[] =
 	PHP_ME(Lapack, singularValues,				lapack_values_args, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	PHP_ME(Lapack, identity,					lapack_values_args, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	PHP_ME(Lapack, pseudoInverse,				lapack_values_args, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
+	PHP_ME(Lapack, shapeRegressionModel,		lapack_srm_args, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
 	{ NULL, NULL, NULL }
 };
 

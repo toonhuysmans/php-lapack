@@ -93,7 +93,7 @@ From a limited survey, most distribution LAPACK packages do not include lapacke,
     cd lapack
     mkdir build
     cd build
-    cmake -D BUILD_SHARED_LIBS=ON -D LAPACKE=ON ../
+    cmake -D BUILD_SHARED_LIBS=ON -D LAPACKE=ON -D CBLAS=ON ../
     make 
     sudo make install
     
