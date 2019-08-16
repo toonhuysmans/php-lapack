@@ -46,7 +46,23 @@ dnl Get PHP version depending on shared/static build
   ],[
     LAPACK_SHARED_LIBADD -llapacke
   ])
-  
+
+  AC_MSG_CHECKING([for cblas shared libraries])
+  PHP_CHECK_LIBRARY(blas,cblas_dgemm,
+  [
+    PHP_ADD_LIBRARY_WITH_PATH(blas, $LAPACK_PREFIX/lib, LAPACK_SHARED_LIBADD)
+  ],[
+    PHP_CHECK_LIBRARY(openblas,cblas_dgemm,
+    [
+      PHP_ADD_LIBRARY_WITH_PATH(openblas, $LAPACK_PREFIX/lib, LAPACK_SHARED_LIBADD)
+    ],[
+      AC_MSG_ERROR([wrong openblas/blas version or library not found])
+    ],[
+      LAPACK_SHARED_LIBADD -lopenblas
+    ])
+  ],[
+    LAPACK_SHARED_LIBADD -lblas
+  ])  
   
   PHP_NEW_EXTENSION(lapack, lapack.c, $ext_shared)
   AC_DEFINE(HAVE_LAPACK,1,[ ])
